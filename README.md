@@ -1,15 +1,41 @@
-# Sacramentum
+<p align="center">
+  <img src="assets/logo.svg" alt="Sacramentum" width="112" height="112" />
+</p>
 
-An escrow tribunal for agentic marketplaces. A buyer locks GEN against a
-machine-readable deliverable spec; the funds release only when the deliverable
-is judged to satisfy that spec, and either party can contest a verdict once by
-staking an appeal bond. The loser of the appeal forfeits the bond to the other
-party. Nothing is decided by a trusted operator: an onchain panel of GenLayer
-validators reads the committed evidence and reaches consensus on the decision.
+<h1 align="center">Sacramentum</h1>
 
-> The name is Roman: a *sacramentum* was the stake both parties deposited in the
-> oldest Roman trial. The loser's stake was forfeited. The bonded appeal is the
-> same idea, onchain.
+<p align="center">
+  <b>An escrow tribunal for agentic marketplaces.</b><br/>
+  A buyer locks GEN against a machine-readable deliverable spec. Funds release only when a
+  panel of GenLayer validators — reading the committed evidence — agrees the work satisfies
+  that spec. Either party can contest a verdict once by staking an appeal bond, and the loser
+  forfeits it. Nothing is decided by a trusted operator.
+</p>
+
+<p align="center">
+  <img alt="GenLayer" src="https://img.shields.io/badge/GenLayer-intelligent_contract-c9a25b?style=flat-square&amp;labelColor=0e141a" />
+  <img alt="Next.js" src="https://img.shields.io/badge/Next.js-16.4-000000?style=flat-square&amp;logo=nextdotjs&amp;logoColor=white" />
+  <img alt="React" src="https://img.shields.io/badge/React-19-0e141a?style=flat-square&amp;logo=react&amp;logoColor=c9a25b" />
+  <img alt="Studionet" src="https://img.shields.io/badge/Studionet-61999-0e141a?style=flat-square&amp;labelColor=c9a25b" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-4_layers-c9a25b?style=flat-square&amp;labelColor=0e141a" />
+</p>
+
+---
+
+> **The name is Roman.** A *sacramentum* was the stake both parties deposited in
+> the oldest Roman trial. The loser's stake was forfeited. The bonded appeal is
+> the same idea, onchain.
+
+## At a glance
+
+| | |
+| --- | --- |
+| **Contract** | `0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6` on Studionet |
+| **Chain** | GenLayer Studionet · id `61999` (`0xF22F`) |
+| **Interface** | 13 writes · 8 views · no constructor args |
+| **Consensus** | leader/validator round comparing `outcome` + `release_bps` only |
+| **Frontend** | Next.js 16 · React 19 · Tailwind v4, talks to the RPC directly |
+| **Verification** | 39 passed / 0 failed on-chain (write + read, balance deltas) |
 
 ## Lifecycle
 
@@ -21,7 +47,7 @@ OPEN -> FUNDED -> ACCEPTED -> DELIVERED ---- confirm ------> RELEASED
                                DISPUTED --resolve--> RESOLVED --appeal--> APPEALED
                                    |                    |                    |
                                    |                    |               resolve_appeal
-                          claim_timeout          finalize (no appeal)        |
+                           claim_timeout          finalize (no appeal)        |
                                    |                    |                    |
                                    v                    v                    v
                                REFUNDED             FINALIZED  <---- finalize
@@ -113,12 +139,14 @@ divides by a float; release shares are integer basis points.
 
 ## Contract surface
 
-- Writes: `open_deal`, `fund_deal`, `accept_deal`, `cancel_deal`,
-  `submit_delivery`, `confirm_delivery`, `raise_dispute`, `submit_evidence`,
-  `resolve`, `appeal`, `resolve_appeal`, `finalize`, `claim_timeout`,
-  `__on_errored_message__`.
-- Views: `get_deal`, `get_terms`, `get_deal_audit`, `get_verdict`, `get_deal_ids`,
-  `get_deal_count`, `get_stats`, `get_log`.
+| Writes (13) | Views (8) |
+| --- | --- |
+| `open_deal` · `fund_deal` · `accept_deal` | `get_deal` · `get_terms` · `get_deal_audit` |
+| `cancel_deal` · `submit_delivery` · `confirm_delivery` | `get_verdict` · `get_deal_ids` · `get_deal_count` |
+| `raise_dispute` · `submit_evidence` · `resolve` | `get_stats` · `get_log` |
+| `appeal` · `resolve_appeal` · `finalize` · `claim_timeout` | |
+
+`__on_errored_message__` is the runtime's error callback and cannot be called by hand.
 
 ## Layout
 
@@ -172,6 +200,7 @@ the `test`/`latest` aliases, so that hash is deliberate.
 ```bash
 npm run deploy:dry   # prints what it would do, sends nothing
 npm run deploy       # deploys and reads the contract back to prove it is real
+npm run demo         # deploys fresh and exercises every write path and view
 ```
 
 The driver lives in `scripts/studionet.cjs` and is used by `deploy/deployScript.ts`.
@@ -193,14 +222,6 @@ straight to disk, prints only the address) with:
 
 ```bash
 node scripts/newWallet.cjs seller
-```
-
-Deploy it, then drive every method end-to-end:
-
-```bash
-npm run deploy:dry   # prints what it would do, sends nothing
-npm run deploy       # deploys and reads the contract back to prove it is real
-npm run demo         # deploys fresh and exercises every write path and view
 ```
 
 `npm run demo` needs two signing accounts (buyer and seller), read as above. It
@@ -228,10 +249,9 @@ holds deals.
 
 Note the accounting subtlety it encodes: a reverting payable call does not
 refund its attached value on Studionet, so the verifier never sends value to a
-call it expects to revert. (`__on_errored_message__` is a callback the runtime
-invokes and cannot be exercised by hand.)
+call it expects to revert.
 
-Deployed on Studionet:
+## Live deployment
 
 ```
 contract  0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6
@@ -239,5 +259,4 @@ tx        0x65f15e8753607534d4d2bacbea46985609fc569a54e3a9ba9f3568354ec841d0
 ```
 
 Last verified against that address live (write + read, buyer `0x3958…98E0`,
-seller `0x99bF…5Db3`): 39 passed, 0 failed.
-
+seller `0x99bF…5Db3`): **39 passed, 0 failed**.

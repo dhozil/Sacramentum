@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Sacramentum">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#121a22"/>
+      <stop offset="1" stop-color="#0a0d10"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e6c683"/>
+      <stop offset="0.5" stop-color="#c9a25b"/>
+      <stop offset="1" stop-color="#9c7a3c"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="122" height="122" rx="30" fill="url(#bg)" stroke="#c9a25b" stroke-opacity="0.55" stroke-width="4"/>
+  <g fill="none" stroke="url(#brass)" stroke-linecap="round">
+    <circle cx="64" cy="64" r="38.8" stroke-width="6"/>
+    <circle cx="64" cy="64" r="25.2" stroke-width="3.6" stroke-opacity="0.55"/>
+    <path d="M64 42.6v42.8M42.6 64h42.8" stroke-width="4" stroke-opacity="0.45"/>
+    <path d="M50 76.4a14 14 0 0 1 28 0" stroke="#e6c683" stroke-width="6"/>
+  </g>
+</svg>

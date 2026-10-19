@@ -57,8 +57,11 @@ appeal round. Repo folder stays
 - Chain id `61999` (`0xf22f`), RPC `https://studio.genlayer.com/api`, GEN 18
   decimals, `isStudio:true` → `writeContract` returns an EVM tx hash. No gas
   observed (balance deltas exact).
-- Cloudflare blocks non-browser User-Agent, so the Python SDK / gltest cannot
-  reach the RPC — use genlayer-js / Node (`scripts/studionet.cjs`).
+- Cloudflare blocks non-browser User-Agent. gltest DOES reach Studionet (it goes
+  through `requests`/gltest_cli, not a raw urllib probe — that gets error 1010):
+  `gltest tests/integration -v -s --network studionet` ran 5 passed / 0 failed
+  (+1 `-m slow`) on 2026-10-19. The genlayer-js / Node driver
+  (`scripts/studionet.cjs`) is still what the deploy/verify scripts use.
 - RPC limits ~30/min, ~500/hr (−32029 + `retry_after_seconds`).
 - A FINALIZED tx can still have rolled back — inspect
   `consensus_data.leader_receipt`.
@@ -73,7 +76,12 @@ appeal round. Repo folder stays
 - Verified against it (not a fresh deploy): **39 passed, 0 failed**. Buyer =
   `wallet/.env` `GENLAYER_DEV_KEY` = `0x3958A649b41cd7C8561F4233cC0F5b0469Bc98E0`;
   seller = `wallet/seller.env` = `0x99bF44395CaC814E671ADFF8b69d968Fac4e5Db3`.
-  Deals `d1..d4` are live on it.
+  Deals `d1..d5` are live on it (`d5` = OPEN, made by `frontendIntegration --full`).
+- Last full re-verification (2026-10-19): `npm run verify` on a fresh deploy
+  (`0x6272014cB81b112b75f67Ee07BE828998F78D777`) = **38 passed / 0 failed** — one
+  fewer than 39 only because the "seller funded" check is skipped when the seller
+  already holds ≥1 GEN. `test:frontend:write` 16/0, `--full` 20/0 (phases
+  `signing → waiting → confirmed`), context read-only 12/0.
 - Wallet folder `D:\Genlayer-project\wallet`: `.env` (buyer key), `seller.env` +
   `seller.json` (new seller), `address.txt`, `recipient.json` (older seller,
   fallback). Never commit keys.
@@ -103,6 +111,8 @@ appeal round. Repo folder stays
   (180, full-bleed square). Regenerate with sharp from `icon.svg`
   (`frontend/node_modules/sharp`); the `.ico` is a hand-built PNG-in-ICO
   container. Colours: ink `#0e141a`→`#0a0d10`, brass `#c9a25b`/`#e6c683`.
+  `README.md` is headed by `assets/logo.svg` — a 128px stand-alone copy of the
+  same emblem (keep it in step with `icon.svg`).
 - 3D hero is an original scene:
   `frontend/src/components/ui/escrow-armillary-3d.tsx` ("Escrow Armillary" — a
   brass vault with five orbiting stations market/escrow/delivery/tribunal/
