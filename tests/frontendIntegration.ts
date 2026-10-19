@@ -11,7 +11,9 @@
  *   node tests/frontendIntegration.ts
  * Add the write/error paths (needs the buyer key):
  *   node tests/frontendIntegration.ts --write
- * Add a real open_deal round-trip (creates one OPEN deal):
+ * Add the full happy path — open, fund, accept, deliver, confirm — through the
+ * frontend wrappers. This moves 0.01 GEN of real escrow buyer -> seller and
+ * leaves one RELEASED deal behind (needs both keys):
  *   node tests/frontendIntegration.ts --full
  */
 
@@ -32,7 +34,7 @@ const WALLET_ENV = path.join(WALLET_DIR, ".env");
 const WALLET_SELLER_ENV = path.join(WALLET_DIR, "seller.env");
 const WALLET_RECIPIENT = path.join(WALLET_DIR, "recipient.json");
 
-const { createRawClient, readKeyFromEnv, readKeyFromJson } = require(
+const { createRawClient, makeDriver, readKeyFromEnv, readKeyFromJson } = require(
   path.join(ROOT, "scripts", "studionet.cjs"),
 );
 
@@ -46,6 +48,7 @@ function check(label, ok, detail = "") {
   console.log(`   ${ok ? "PASS" : "FAIL"}  ${label}${detail ? `  [${detail}]` : ""}`);
 }
 const section = (text) => console.log(`\n[${text}]`);
+const fmtGen = (atto) => `${(Number(atto) / 1e18).toFixed(6)} GEN`;
 
 // --------------------------------------------------------------- the modules
 
@@ -77,7 +80,7 @@ async function main() {
 
   console.log("Sacramentum frontend ↔ live contract");
   console.log(`  contract:  ${S.ADDRESS}`);
-  console.log(`  mode:      ${FULL ? "full (reads + writes)" : WRITE ? "write (reads + error paths)" : "read-only"}`);
+  console.log(`  mode:      ${FULL ? "full (reads + writes + GEN round-trip)" : WRITE ? "write (reads + error paths)" : "read-only"}`);
 
   section("1. read the market through the frontend readers");
   const ids = await S.getDealIds(read);
@@ -153,13 +156,17 @@ async function main() {
   }
 
   if (FULL) {
-    section("5. full path — open_deal round-trips through the frontend");
+    section("5. full path — the happy path moves GEN through the frontend");
     const { buyerKey, sellerKey } = loadKeys();
     if (!buyerKey || !sellerKey) {
       check("buyer and seller keys available for --full", false);
     } else {
       const buyer = createRawClient(buyerKey);
       const seller = createRawClient(sellerKey);
+      const shared = { lastCall: 0 };
+      const bd = makeDriver(buyer, shared);
+      const sd = makeDriver(seller, shared);
+      const ESCROW = 10n ** 16n; // 0.01 GEN
       const phases = [];
       const deadline = Math.floor(Date.now() / 1000) + 3600;
       const title = `integration smoke ${new Date().toISOString()}`;
@@ -167,6 +174,20 @@ async function main() {
         deliverable: "A page that exists at the given URL.",
         criteria: [{ id: "C1", text: "The URL is reachable over HTTPS." }],
       });
+
+      const balance = async (driver) => BigInt(await driver.balance());
+      /** Poll a native balance until it moved by `delta`, then assert the delta. */
+      const expectDelta = async (label, driver, delta, base, timeoutMs = 90000) => {
+        const want = base + delta;
+        const start = Date.now();
+        let now = await balance(driver);
+        while (now !== want && Date.now() - start < timeoutMs) {
+          await sleep(3000);
+          now = await balance(driver);
+        }
+        check(label, now === want, `delta=${fmtGen(now - base)} expected=${fmtGen(delta)}`);
+      };
+
       const opened = await S.openDeal(
         buyer,
         {
@@ -184,9 +205,38 @@ async function main() {
       if (opened.ok) {
         const fresh = await S.getDealIds(read);
         const id = fresh[fresh.length - 1];
-        const deal = await S.getDeal(read, id);
-        check("the new deal reads back", deal.id === id && deal.status === "OPEN", `${id} · ${deal.status}`);
-        check("the title survived the contract clip", deal.title === title);
+        const created = await S.getDeal(read, id);
+        check("the new deal reads back OPEN", created.id === id && created.status === "OPEN", `${id} · ${created.status}`);
+        check("the title survived the contract clip", created.title === title);
+
+        const buyerBefore = await balance(bd);
+        const funded = await S.fundDeal(buyer, id, ESCROW, (p) => phases.push(p));
+        check("fundDeal succeeds", funded.ok === true, funded.ok ? funded.hash.slice(0, 12) : funded.message);
+        await expectDelta("fundDeal moves the escrow out of the buyer", bd, -ESCROW, buyerBefore);
+        const fundedDeal = await S.getDeal(read, id);
+        check(
+          "the deal reads back FUNDED with the escrow",
+          fundedDeal.status === "FUNDED" && BigInt(fundedDeal.escrow_atto) === ESCROW,
+          `${fundedDeal.status} · ${fundedDeal.escrow_atto}`,
+        );
+
+        const accepted = await S.acceptDeal(seller, id, (p) => phases.push(p));
+        check("acceptDeal succeeds", accepted.ok === true, accepted.ok ? accepted.hash.slice(0, 12) : accepted.message);
+        const delivered = await S.submitDelivery(seller, id, "https://example.com", "v1 live", (p) => phases.push(p));
+        check("submitDelivery succeeds", delivered.ok === true, delivered.ok ? delivered.hash.slice(0, 12) : delivered.message);
+
+        const sellerBefore = await balance(sd);
+        const confirmed = await S.confirmDelivery(buyer, id, (p) => phases.push(p));
+        check("confirmDelivery succeeds", confirmed.ok === true, confirmed.ok ? confirmed.hash.slice(0, 12) : confirmed.message);
+        await expectDelta("confirmDelivery pays the seller the escrow", sd, ESCROW, sellerBefore);
+        const released = await S.getDeal(read, id);
+        check(
+          "the deal reads back RELEASED/COMPLIANT",
+          released.status === "RELEASED" && released.outcome === "COMPLIANT",
+          `${released.status}/${released.outcome}`,
+        );
+        check("stats stay conserved after the release", (await S.getStats(read)).conserved === true);
+        console.log(`   ${fmtGen(ESCROW)} moved buyer → seller through the frontend (deal ${id})`);
       }
     }
   }

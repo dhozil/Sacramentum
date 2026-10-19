@@ -184,6 +184,7 @@ gltest tests/integration -v -s -m slow --network studionet   # the model-calling
 npm run test:sync            # static: methods, args, constants, statuses in lockstep
 npm run test:frontend        # live reads of the deployed contract through the UI readers
 npm run test:frontend:write  # adds the write/error path (needs the buyer key)
+npm run test:frontend:full   # full happy path: moves 0.01 GEN escrow buyer -> seller
 ```
 
 The lint step prints a Unicode check mark that a Windows console cannot encode;

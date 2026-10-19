@@ -26,8 +26,10 @@ appeal round. Repo folder stays
   (or `node deploy/verifyScript.ts --address <0x…>` to attach to a deployment).
 - Frontend ↔ contract sync (no network, fast): `npm run test:sync`.
 - Frontend ↔ live contract (read-only): `npm run test:frontend`
-  (`npm run test:frontend:write` adds the error-path write; `--full` adds a real
-  `open_deal` round-trip that creates one OPEN deal).
+  (`npm run test:frontend:write` adds the error-path write; `npm run
+  test:frontend:full`/`--full` drives the whole happy path — open, fund, accept,
+  deliver, confirm — moving 0.01 GEN of real escrow buyer → seller and leaving a
+  RELEASED deal).
 - Frontend: in `frontend/` run `npm run lint`, `npm run build`, `npm run dev`.
 
 ## Durable facts / decisions
@@ -76,12 +78,14 @@ appeal round. Repo folder stays
 - Verified against it (not a fresh deploy): **39 passed, 0 failed**. Buyer =
   `wallet/.env` `GENLAYER_DEV_KEY` = `0x3958A649b41cd7C8561F4233cC0F5b0469Bc98E0`;
   seller = `wallet/seller.env` = `0x99bF44395CaC814E671ADFF8b69d968Fac4e5Db3`.
-  Deals `d1..d5` are live on it (`d5` = OPEN, made by `frontendIntegration --full`).
+  Deals `d1..d6` are live on it (`d5` = OPEN and `d6` = RELEASED, both made by
+  `frontendIntegration --full`).
 - Last full re-verification (2026-10-19): `npm run verify` on a fresh deploy
   (`0x6272014cB81b112b75f67Ee07BE828998F78D777`) = **38 passed / 0 failed** — one
   fewer than 39 only because the "seller funded" check is skipped when the seller
-  already holds ≥1 GEN. `test:frontend:write` 16/0, `--full` 20/0 (phases
-  `signing → waiting → confirmed`), context read-only 12/0.
+  already holds ≥1 GEN. `test:frontend:write` 16/0, `--full` 29/0 (moves 0.01 GEN
+  buyer → seller through the frontend wrappers, phases `signing → waiting →
+  confirmed`), context read-only 12/0.
 - Wallet folder `D:\Genlayer-project\wallet`: `.env` (buyer key), `seller.env` +
   `seller.json` (new seller), `address.txt`, `recipient.json` (older seller,
   fallback). Never commit keys.

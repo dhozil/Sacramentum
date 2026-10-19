@@ -11,7 +11,8 @@
     "verify": "node deploy/verifyScript.ts",
     "test:sync": "node tests/frontendSync.ts",
     "test:frontend": "node tests/frontendIntegration.ts",
-    "test:frontend:write": "node tests/frontendIntegration.ts --write"
+    "test:frontend:write": "node tests/frontendIntegration.ts --write",
+    "test:frontend:full": "node tests/frontendIntegration.ts --full"
   },
   "engines": {
     "node": ">=20"
