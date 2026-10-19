@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Node (deploy drivers)
+node_modules/
+
+# GenLayer
+artifacts/
+.gltest-release-cache.json
+
+# Secrets — never commit keys
+.env
+*.key
+scripts/.deployer.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Integration test staging (per-deploy contract copies)
+contracts/.integration/

@@ -1,0 +1,66 @@
+[project]
+name = "sacramentum"
+version = "0.1.0"
+description = "Sacramentum: an agentic escrow tribunal whose release is adjudicated by GenLayer validators from committed evidence, with one bonded appeal round."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["genlayer", "intelligent-contract", "escrow", "dispute-resolution", "agentic-marketplace"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Testing",
+]
+
+# genlayer-test brings the pytest plugin and the direct-mode harness.
+# genvm-linter is the official linter for the pinned GenVM runner and is what
+# CI gates on, so it is a hard dependency rather than a nice-to-have.
+dependencies = [
+  "genlayer-test>=0.29",
+  "genvm-linter>=0.11",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://docs.genlayer.com"
+
+# This repository is a contract, its tests and its tooling. It is not an
+# importable library: contracts/sacramentum.py is a GenVM entry point
+# that must never be installed as a module, and the direct-mode tests load it
+# from its path. An empty package list is what lets `pip install -e .` install
+# the dependencies above and nothing else.
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+  "direct: direct-mode test, runs contract code in-process with mocked web and LLM calls",
+  "slow: integration test that runs real consensus and real model calls",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+  # The contract module is a GenVM entry point: genvm-linter owns its style.
+  "E501",
+  "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"

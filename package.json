@@ -1,0 +1,19 @@
+{
+  "name": "sacramentum",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sacramentum: an agentic escrow tribunal on GenLayer, with a hosted deploy driver.",
+  "scripts": {
+    "deploy": "node deploy/deployScript.ts",
+    "deploy:dry": "node deploy/deployScript.ts --dry-run",
+    "demo": "node deploy/demoScript.ts",
+    "verify": "node deploy/verifyScript.ts",
+    "test:sync": "node tests/frontendSync.ts",
+    "test:frontend": "node tests/frontendIntegration.ts",
+    "test:frontend:write": "node tests/frontendIntegration.ts --write"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
