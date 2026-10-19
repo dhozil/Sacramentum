@@ -13,6 +13,19 @@ export const CHAIN_PARAMS = {
   blockExplorerUrls: ["https://genlayer-explorer.vercel.app"],
 };
 
+/**
+ * In the browser we talk to our own `/api/rpc` route (same-origin) instead of
+ * the RPC host directly, so the page never depends on the RPC's CORS headers.
+ * In Node (tests, scripts) we go straight to the node.
+ */
+function clientChain() {
+  if (typeof window === "undefined") return STUDIONET;
+  return {
+    ...STUDIONET,
+    rpcUrls: { default: { http: [`${window.location.origin}/api/rpc`] } },
+  };
+}
+
 /** The slice of the genlayer-js client this app actually uses. */
 export interface GenLayer {
   readContract(args: {
@@ -54,7 +67,7 @@ export interface ProtocolReceipt {
 
 /** A read-only client; no account, reads straight from the node. */
 export function makeReadClient(): GenLayer {
-  return createClient({ chain: STUDIONET }) as unknown as GenLayer;
+  return createClient({ chain: clientChain() }) as unknown as GenLayer;
 }
 
 /**
@@ -66,7 +79,7 @@ export function makeReadClient(): GenLayer {
  * touches `window.ethereum`.
  */
 export function makeWriteClient(address: string, provider: Eip1193Provider): GenLayer {
-  return createClient({ chain: STUDIONET, account: address, provider } as never) as unknown as GenLayer;
+  return createClient({ chain: clientChain(), account: address, provider } as never) as unknown as GenLayer;
 }
 
 export async function getChainId(provider: Eip1193Provider): Promise<number | null> {

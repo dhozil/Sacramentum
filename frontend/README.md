@@ -44,13 +44,15 @@ npm run build
 - `src/components/wallet/*` — discovery, chooser dialog, account menu.
 - `src/hooks/*` — `useRead`-based data hooks, `useTx` write state, `useNow`.
 - `src/components/deal/*` — cards, verdict panel, action panel.
-- `src/components/ui/agentic-factory-3d.tsx` — the interactive 3D instrument
-  (procedural three.js), re-themed for the escrow tribunal.
+- `src/components/ui/escrow-armillary-3d.tsx` — the interactive 3D instrument
+  (procedural three.js) — the "Escrow Armillary".
 
 ## Notes
 
-- Reads go straight from the browser to the RPC; the endpoint returns
-  `Access-Control-Allow-Origin` for localhost, so no proxy is needed.
+- Reads go through our own same-origin proxy (`src/app/api/rpc/route.ts`), which
+  forwards to the RPC host. In the browser the client uses `/api/rpc`; in Node
+  (tests/scripts) it hits the RPC directly. This avoids the CORS dependency on
+  the deployed origin.
 - A reverting write still costs the caller any attached `value`; the UI only
   attaches value to `fund_deal` and `appeal`.
 - Never commit `.env.local`.

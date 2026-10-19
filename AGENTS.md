@@ -69,8 +69,13 @@ appeal round. Repo folder stays
   `consensus_data.leader_receipt`.
 - A reverting payable call does NOT refund attached value → never send `value`
   to a call expected to revert.
-- The RPC returns `Access-Control-Allow-Origin` for localhost, so the browser
-  frontend talks to it directly (no proxy needed).
+- Browser RPC calls go through a same-origin proxy:
+  `frontend/src/app/api/rpc/route.ts` POSTs to `https://studio.genlayer.com/api`,
+  and `lib/genlayer.ts` points the client chain at `/api/rpc` when `window`
+  exists (real RPC in Node, so the Node tests are unchanged). Direct browser
+  calls to the RPC from the deployed origin were blocked by CORS; the proxy
+  removes that dependency. Do NOT re-add `runtime`/`dynamic` route-segment
+  exports — `cacheComponents` rejects them.
 
 ## Live deployment
 - Canonical contract: `0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6`
