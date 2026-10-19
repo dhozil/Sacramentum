@@ -103,7 +103,10 @@ appeal round. Repo folder stays
 - Routes: `/`, `/market`, `/deal/[id]`, `/open`, `/how-it-works` (user-facing
   explainer; header nav says "How it works" — internal, not the GenLayer docs).
   Page containers are `max-w-[1536px]` (header→footer) so the full-bleed 3D hero
-  has room.
+  has room. `/market` filters by status (All/Open/In flight/Disputed/Settled) and
+  by **Role** (`Everyone` / `As seller` / `As buyer`) — the role tabs show
+  per-view counts once a wallet is connected, so a seller can spot deals naming
+  their address.
 - Site-wide background motes: `frontend/src/components/particle-field.tsx` is a
   fixed `<canvas>` (`z-0`) mounted in `layout.tsx`; all content sits in a
   `relative z-10` wrapper above it. Drifting/twinkling brass dots echoing the 3D
