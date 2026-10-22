@@ -2,7 +2,7 @@ import type { GenLayer as Client, ProtocolReceipt } from "./genlayer";
 
 /** The deployed Sacramentum instance this app talks to. Override via env. */
 export const ADDRESS =
-  process.env.NEXT_PUBLIC_SACRAMENTUM_ADDRESS ?? "0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6";
+  process.env.NEXT_PUBLIC_SACRAMENTUM_ADDRESS ?? "0x9b3790A80972EE0a052022b2B595489573ec5361";
 
 // ---------------------------------------------------------------- data shapes
 
@@ -18,6 +18,10 @@ export interface Deal {
   delivery_url: string;
   delivered_at_unix: number;
   outcome: string;
+  unresolved_at_unix: number;
+  appeal_filed_at_unix: number;
+  /** Earliest time claim_timeout() may close a stuck DISPUTED/APPEALED deal. */
+  recovery_at_unix: number;
   release_bps: number;
   confidence: number;
   appeal_deadline_unix: number;
@@ -50,6 +54,10 @@ export interface DealAudit {
   outcome: string;
   release_bps: number;
   first_release_bps: number;
+  deadline_unix: number;
+  delivered_at_unix: number;
+  unresolved_at_unix: number;
+  appeal_filed_at_unix: number;
   rationale: string;
   confidence: number;
   sources: string[];
@@ -171,7 +179,9 @@ export const PROTOCOL = {
   appealBondBps: 2500,
   minAppealBondAtto: 10n ** 15n,
   releaseBucketBps: 500,
-  releaseToleranceBps: 500,
+  // Below the 500 bps bucket width, so partial payouts must agree exactly.
+  releaseToleranceBps: 250,
+  unresolvedGraceSec: 3600,
   maxEvidencePerParty: 3,
   maxSources: 3,
   maxCriteria: 12,
@@ -282,12 +292,45 @@ export async function getLog(client: Client, start = 0, count = 200): Promise<Lo
 // -------------------------------------------------------------- write helpers
 
 export type WriteResult =
-  | { ok: true; hash: string; receipt: ProtocolReceipt }
+  | { ok: true; hash: string; receipt: ProtocolReceipt; stateConfirmed: boolean }
   | { ok: false; message: string; hash?: string };
 
-/** Progress of a write, surfaced to the UI so a slow consensus stays legible. */
-export type TxPhase = "idle" | "signing" | "waiting" | "confirmed";
+/**
+ * Progress of a write, surfaced to the UI so a slow consensus stays legible.
+ *
+ * `accepted` means consensus returned a receipt but a follow-up read has not yet
+ * observed the expected state change: the execution is accepted, the result is
+ * not confirmed. `confirmed` means the change was actually read back.
+ */
+export type TxPhase =
+  | "idle"
+  | "signing"
+  | "waiting"
+  | "confirming"
+  | "confirmed"
+  | "accepted";
 export type PhaseReporter = (phase: TxPhase) => void;
+
+/** Resolves true once the expected on-chain state can be read back. */
+export type StateVerifier = () => Promise<boolean>;
+
+const STATE_CONFIRM = {
+  /** Short and bounded: confirm the state without turning a done write into a spinner. */
+  intervalMs: 3000,
+  retries: 10,
+} as const;
+
+async function waitForState(verify: StateVerifier): Promise<boolean> {
+  for (let attempt = 0; attempt < STATE_CONFIRM.retries; attempt += 1) {
+    try {
+      if (await verify()) return true;
+    } catch {
+      // A failed read is not a failed write: keep polling until the budget ends.
+    }
+    if (attempt + 1 < STATE_CONFIRM.retries) await sleep(STATE_CONFIRM.intervalMs);
+  }
+  return false;
+}
 
 /**
  * Studionet reaches consensus slowly — validators propose, commit, and reveal
@@ -384,6 +427,7 @@ export async function submit(
   args: unknown[] = [],
   value = 0n,
   onPhase?: PhaseReporter,
+  verify?: StateVerifier,
 ): Promise<WriteResult> {
   onPhase?.("signing");
   let hash: string;
@@ -425,11 +469,24 @@ export async function submit(
     return { ok: false, message: clean, hash };
   }
 
-  onPhase?.("confirmed");
-  return { ok: true, hash, receipt };
+  // A receipt proves consensus accepted the execution, not that the ledger
+  // already reads the new state. Read it back before the UI calls it done.
+  let stateConfirmed = true;
+  if (verify) {
+    onPhase?.("confirming");
+    stateConfirmed = await waitForState(verify);
+  }
+  onPhase?.(stateConfirmed ? "confirmed" : "accepted");
+  return { ok: true, hash, receipt, stateConfirmed };
 }
 
-export const openDeal = (
+/** Verify a deal reached one of the expected statuses by reading it back. */
+const statusVerifier =
+  (client: Client, id: string, ...statuses: string[]): StateVerifier =>
+  async () =>
+    statuses.includes((await getDeal(client, id)).status);
+
+export async function openDeal(
   client: Client,
   input: {
     seller: string;
@@ -439,22 +496,30 @@ export const openDeal = (
     evidenceUrls: string[];
   },
   onPhase?: PhaseReporter,
-) =>
-  submit(
+) {
+  let before: number | null = null;
+  try {
+    before = (await getDealIds(client)).length;
+  } catch {
+    before = null;
+  }
+  return submit(
     client,
     "open_deal",
     [input.seller, input.title, input.termsJson, input.deadlineUnix, input.evidenceUrls],
     0n,
     onPhase,
+    before === null ? undefined : async () => (await getDealIds(client)).length > before,
   );
+}
 
 export const fundDeal = (client: Client, id: string, amount: bigint, onPhase?: PhaseReporter) =>
-  submit(client, "fund_deal", [id], amount, onPhase);
+  submit(client, "fund_deal", [id], amount, onPhase, statusVerifier(client, id, "FUNDED"));
 
 export const acceptDeal = (client: Client, id: string, onPhase?: PhaseReporter) =>
-  submit(client, "accept_deal", [id], 0n, onPhase);
+  submit(client, "accept_deal", [id], 0n, onPhase, statusVerifier(client, id, "ACCEPTED"));
 export const cancelDeal = (client: Client, id: string, onPhase?: PhaseReporter) =>
-  submit(client, "cancel_deal", [id], 0n, onPhase);
+  submit(client, "cancel_deal", [id], 0n, onPhase, statusVerifier(client, id, "REFUNDED"));
 
 export const submitDelivery = (
   client: Client,
@@ -462,29 +527,86 @@ export const submitDelivery = (
   url: string,
   note: string,
   onPhase?: PhaseReporter,
-) => submit(client, "submit_delivery", [id, url, note], 0n, onPhase);
+) =>
+  submit(
+    client,
+    "submit_delivery",
+    [id, url, note],
+    0n,
+    onPhase,
+    statusVerifier(client, id, "DELIVERED", "DISPUTED", "RELEASED", "REFUNDED"),
+  );
 
 export const confirmDelivery = (client: Client, id: string, onPhase?: PhaseReporter) =>
-  submit(client, "confirm_delivery", [id], 0n, onPhase);
+  submit(client, "confirm_delivery", [id], 0n, onPhase, statusVerifier(client, id, "RELEASED"));
 
 export const raiseDispute = (client: Client, id: string, reason: string, onPhase?: PhaseReporter) =>
-  submit(client, "raise_dispute", [id, reason], 0n, onPhase);
+  submit(client, "raise_dispute", [id, reason], 0n, onPhase, statusVerifier(client, id, "DISPUTED"));
 
-export const submitEvidence = (
+export async function submitEvidence(
   client: Client,
   id: string,
   url: string,
   statement: string,
   onPhase?: PhaseReporter,
-) => submit(client, "submit_evidence", [id, url, statement], 0n, onPhase);
+) {
+  let before: number | null = null;
+  try {
+    before = (await getAudit(client, id)).evidence.length;
+  } catch {
+    before = null;
+  }
+  return submit(
+    client,
+    "submit_evidence",
+    [id, url, statement],
+    0n,
+    onPhase,
+    before === null
+      ? undefined
+      : async () => (await getAudit(client, id)).evidence.length > before,
+  );
+}
 
-export const resolve = (client: Client, id: string, onPhase?: PhaseReporter) =>
-  submit(client, "resolve", [id], 0n, onPhase);
+export async function resolve(client: Client, id: string, onPhase?: PhaseReporter) {
+  let beforeUnresolved = 0;
+  try {
+    beforeUnresolved = (await getDeal(client, id)).unresolved_at_unix;
+  } catch {
+    beforeUnresolved = 0;
+  }
+  return submit(client, "resolve", [id], 0n, onPhase, async () => {
+    const view = await getDeal(client, id);
+    if (view.status !== "DISPUTED") return true;
+    return view.outcome === "UNDETERMINED" && view.unresolved_at_unix !== beforeUnresolved;
+  });
+}
+
 export const appeal = (client: Client, id: string, bond: bigint, onPhase?: PhaseReporter) =>
-  submit(client, "appeal", [id], bond, onPhase);
-export const resolveAppeal = (client: Client, id: string, onPhase?: PhaseReporter) =>
-  submit(client, "resolve_appeal", [id], 0n, onPhase);
+  submit(client, "appeal", [id], bond, onPhase, statusVerifier(client, id, "APPEALED"));
+
+export async function resolveAppeal(client: Client, id: string, onPhase?: PhaseReporter) {
+  let before = 0;
+  try {
+    before = (await getVerdict(client, id)).rounds.length;
+  } catch {
+    before = 0;
+  }
+  return submit(client, "resolve_appeal", [id], 0n, onPhase, async () => {
+    const report = await getVerdict(client, id);
+    if (report.status !== "APPEALED") return true;
+    return report.rounds.length > before;
+  });
+}
+
 export const finalize = (client: Client, id: string, onPhase?: PhaseReporter) =>
-  submit(client, "finalize", [id], 0n, onPhase);
+  submit(client, "finalize", [id], 0n, onPhase, statusVerifier(client, id, "FINALIZED"));
 export const claimTimeout = (client: Client, id: string, onPhase?: PhaseReporter) =>
-  submit(client, "claim_timeout", [id], 0n, onPhase);
+  submit(
+    client,
+    "claim_timeout",
+    [id],
+    0n,
+    onPhase,
+    statusVerifier(client, id, "REFUNDED", "RELEASED", "FINALIZED"),
+  );

@@ -39,7 +39,8 @@ export function useTx() {
         const res = await fn(write, setPhase);
         setResult(res);
         if (res.ok) {
-          setPhase("confirmed");
+          // Accepted consensus is not the same as an observed state change.
+          setPhase(res.stateConfirmed ? "confirmed" : "accepted");
         } else {
           setError(res.message);
           setPhase("idle");

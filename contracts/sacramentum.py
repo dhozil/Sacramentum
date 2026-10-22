@@ -57,9 +57,16 @@ APPEAL_BOND_BPS = 2500
 MIN_APPEAL_BOND_ATTO = 10 ** 15
 MIN_ESCROW_ATTO = 1
 # release_bps is quantized to a bucket and compared within a bucket so that two
-# reasonable models converge; the outcome enum is compared exactly.
+# reasonable models converge; the outcome enum is compared exactly. Because the
+# bucket is 500 bps, a tolerance below 500 forces two validators to agree on the
+# exact partial bucket: a materially different payout can never pass on its own.
 RELEASE_BUCKET_BPS = 500
-RELEASE_TOLERANCE_BPS = 500
+RELEASE_TOLERANCE_BPS = 250
+# An inconclusive adjudication must not freeze the escrow forever. Once this
+# grace has passed since the last UNDETERMINED round (or since adjudication first
+# became due), anyone may call claim_timeout() to close the deal on a bounded,
+# neutral rule. A fresh resolve() restarts the clock.
+UNRESOLVED_GRACE_SEC = 3600
 # confidence is reported and bucketed for the frontend, but it is audit-only:
 # it is never compared during consensus. Its bucket width is published in
 # get_verdict so a UI can group reported certainty consistently.
@@ -111,6 +118,11 @@ class Deal:
     final: bool
     settled: bool
     paid_atto: u256
+    # Appended after every pre-existing field (storage layout is positional).
+    # Set when an adjudication round comes back UNDETERMINED; 0 once a round
+    # decides. Drives the bounded recovery window in claim_timeout().
+    unresolved_at_unix: u64
+    appeal_filed_at_unix: u64
 
 
 def _clip(value, limit: int) -> str:
@@ -483,9 +495,12 @@ class Sacramentum(gl.Contract):
         """
         Create a deal on machine-readable terms with a committed evidence manifest.
 
-        The buyer is the sender. The manifest is fixed here and cannot be
-        changed afterwards, so the sources validators will read are known before
-        any money moves.
+        The buyer is the sender. The manifest is the baseline the panel always
+        reads; during a dispute either party may additionally file up to
+        MAX_EVIDENCE_PER_PARTY https evidence URLs (submit_evidence), which the
+        panel also reads. The baseline can never be removed, so a deal can never
+        be judged against a smaller source set than the one committed before
+        funding.
         """
         buyer = gl.message.sender_address
         seller_address = _to_address(seller)
@@ -532,6 +547,8 @@ class Sacramentum(gl.Contract):
             final=False,
             settled=False,
             paid_atto=u256(0),
+            unresolved_at_unix=u64(0),
+            appeal_filed_at_unix=u64(0),
         )
         self.deal_sources[deal_id] = [str(item) for item in sources]
         self.deal_count = u256(int(self.deal_count) + 1)
@@ -589,6 +606,12 @@ class Sacramentum(gl.Contract):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} only the seller may submit a delivery")
         if str(deal.status) != STATUS_ACCEPTED:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} deal {deal_id} is not accepted")
+        # A late delivery must never be able to race the buyer's refund: once
+        # deadline_unix has passed, only claim_timeout() may move the escrow.
+        if _now_unix() > int(deal.deadline_unix):
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} the delivery deadline for {deal_id} has passed; the buyer may claim a refund"
+            )
         url = str(delivery_url).strip()
         if not url.startswith("https://"):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} delivery_url must start with https://")
@@ -669,6 +692,9 @@ class Sacramentum(gl.Contract):
             "terms": terms,
             "delivery_url": str(deal.delivery_url),
             "delivery_note": str(deal.delivery_note),
+            "deadline_unix": int(deal.deadline_unix),
+            "delivered_at_unix": int(deal.delivered_at_unix),
+            "on_time": int(deal.delivered_at_unix) <= int(deal.deadline_unix),
             "dispute_reason": str(deal.dispute_reason),
             "sources": self._sources_as_list(deal_id),
             "urls": self._evidence_urls(deal_id),
@@ -733,8 +759,11 @@ class Sacramentum(gl.Contract):
 
         decision = self._adjudicate(deal_id)
         if str(decision["outcome"]) == OUTCOME_UNDETERMINED:
-            # Not a verdict. Keep the dispute open so a later resolve may judge.
+            # Not a verdict. Keep the dispute open so a later resolve may judge,
+            # but stamp the clock: if it stays undetermined, claim_timeout() can
+            # eventually close it instead of letting the escrow freeze forever.
             deal.outcome = OUTCOME_UNDETERMINED
+            deal.unresolved_at_unix = u64(_now_unix())
             deal.rationale = str(decision["rationale"])
             deal.confidence = u256(int(decision["confidence"]))
             self._store_report(deal_id, 0, "first", decision)
@@ -749,6 +778,7 @@ class Sacramentum(gl.Contract):
         self._record_criteria(deal_id, decision)
         self._store_report(deal_id, 0, "first", decision)
         deal.resolved_at_unix = u64(_now_unix())
+        deal.unresolved_at_unix = u64(0)
         deal.appeal_deadline_unix = u64(_now_unix() + APPEAL_WINDOW_SEC)
         deal.final = False
         deal.status = STATUS_RESOLVED
@@ -782,6 +812,7 @@ class Sacramentum(gl.Contract):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} appeal bond must be at least {required} atto")
         deal.appellant = sender
         deal.appeal_bond_atto = u256(received)
+        deal.appeal_filed_at_unix = u64(_now_unix())
         deal.status = STATUS_APPEALED
         self.held_atto = u256(int(self.held_atto) + received)
         self.lifetime_inflow = u256(int(self.lifetime_inflow) + received)
@@ -796,6 +827,7 @@ class Sacramentum(gl.Contract):
 
         decision = self._adjudicate(deal_id)
         if str(decision["outcome"]) == OUTCOME_UNDETERMINED:
+            deal.unresolved_at_unix = u64(_now_unix())
             deal.rationale = str(decision["rationale"])
             self._store_report(deal_id, 1, "appeal", decision)
             self._log({"event": "appeal_undetermined", "id": deal_id})
@@ -805,6 +837,7 @@ class Sacramentum(gl.Contract):
         deal.release_bps = u256(int(decision["release_bps"]))
         deal.confidence = u256(int(decision["confidence"]))
         deal.rationale = str(decision["rationale"])
+        deal.unresolved_at_unix = u64(0)
         self._record_criteria(deal_id, decision)
         self._store_report(deal_id, 1, "appeal", decision)
         deal.appeal_decided = True
@@ -859,7 +892,9 @@ class Sacramentum(gl.Contract):
 
         A funded deal past its deadline with no delivery refunds the buyer; a
         delivered deal past the dispute window with no contest releases to the
-        seller.
+        seller. A dispute or appeal whose adjudication will not conclude is
+        closed on a bounded neutral rule (see `_settle_unresolved_dispute` and
+        `_uphold_first_round`), so escrow and bond can never freeze forever.
         """
         deal = self._require_deal(deal_id)
         status = str(deal.status)
@@ -880,7 +915,112 @@ class Sacramentum(gl.Contract):
             self._pay(deal.seller, int(deal.escrow_atto), "release:" + deal_id)
             self._log({"event": "released", "id": deal_id, "reason": "undisputed_timeout"})
             return
+        if status == STATUS_DISPUTED:
+            if now < self._unresolved_recovery_at(deal):
+                raise gl.vm.UserError(
+                    f"{ERROR_EXPECTED} the dispute for {deal_id} is not yet recoverable; "
+                    "resolve() may still decide it"
+                )
+            self._settle_unresolved_dispute(deal)
+            return
+        if status == STATUS_APPEALED:
+            if now < self._unresolved_recovery_at(deal):
+                raise gl.vm.UserError(
+                    f"{ERROR_EXPECTED} the appeal for {deal_id} is not yet recoverable; "
+                    "resolve_appeal() may still decide it"
+                )
+            self._uphold_first_round(deal)
+            return
         raise gl.vm.UserError(f"{ERROR_EXPECTED} deal {deal_id} cannot be claimed from {status}")
+
+    def _unresolved_recovery_at(self, deal: Deal) -> int:
+        """
+        Earliest unix time at which an inconclusive deal becomes recoverable.
+
+        A round that already came back UNDETERMINED sets `unresolved_at_unix`;
+        every fresh resolve() resets it, so a party may keep retrying. If no
+        round ever ran, measure from the moment adjudication first became due
+        (the evidence window after the dispute; the appeal filing for an appeal).
+        Only live disputes and appeals have a recovery time; everything else
+        reports 0 so a client cannot read a stale window as "recoverable now".
+        """
+        if str(deal.status) not in (STATUS_DISPUTED, STATUS_APPEALED):
+            return 0
+        unresolved_at = int(deal.unresolved_at_unix)
+        if unresolved_at > 0:
+            return unresolved_at + UNRESOLVED_GRACE_SEC
+        if str(deal.status) == STATUS_DISPUTED:
+            return int(deal.dispute_opened_at_unix) + EVIDENCE_WINDOW_SEC + UNRESOLVED_GRACE_SEC
+        return int(deal.appeal_filed_at_unix) + UNRESOLVED_GRACE_SEC
+
+    def _settle_unresolved_dispute(self, deal: Deal) -> None:
+        """
+        Close a permanently inconclusive dispute with a neutral 50/50 split.
+
+        Neither party is punished for a panel that cannot decide, and neither
+        side can stall the escrow forever by keeping evidence unreadable. The
+        split is recorded as PARTIAL so the ledger shows it was not a verdict.
+        """
+        deal_id = str(deal.id)
+        escrow = int(deal.escrow_atto)
+        seller_cut = escrow // 2
+        buyer_cut = escrow - seller_cut
+        deal.outcome = OUTCOME_PARTIAL
+        deal.release_bps = u256(5000)
+        deal.final = True
+        deal.settled = True
+        deal.status = STATUS_FINALIZED
+        self.total_released = u256(int(self.total_released) + seller_cut)
+        self.total_refunded = u256(int(self.total_refunded) + buyer_cut)
+        if seller_cut > 0:
+            self._pay(deal.seller, seller_cut, "unresolved_release:" + deal_id)
+        if buyer_cut > 0:
+            self._pay(deal.buyer, buyer_cut, "unresolved_refund:" + deal_id)
+        self._log({
+            "event": "unresolved_dispute_split",
+            "id": deal_id,
+            "seller_atto": str(seller_cut),
+            "buyer_atto": str(buyer_cut),
+        })
+
+    def _uphold_first_round(self, deal: Deal) -> None:
+        """
+        Close an inconclusive appeal by upholding the first verdict.
+
+        An appeal that the panel cannot decide is not a losing appeal: the
+        round-one split stands and the bond is returned to the appellant. This
+        keeps the escrow (and the bond) from being locked by a flaky panel.
+        """
+        deal_id = str(deal.id)
+        if str(deal.outcome) not in (OUTCOME_COMPLIANT, OUTCOME_NON_COMPLIANT, OUTCOME_PARTIAL):
+            deal.outcome = OUTCOME_PARTIAL
+            deal.release_bps = u256(5000)
+        else:
+            deal.release_bps = u256(int(deal.first_release_bps))
+        escrow = int(deal.escrow_atto)
+        seller_cut = escrow * int(deal.release_bps) // 10000
+        buyer_cut = escrow - seller_cut
+        deal.appeal_decided = True
+        deal.final = True
+        deal.settled = True
+        deal.status = STATUS_FINALIZED
+        self.total_released = u256(int(self.total_released) + seller_cut)
+        self.total_refunded = u256(int(self.total_refunded) + buyer_cut)
+        if seller_cut > 0:
+            self._pay(deal.seller, seller_cut, "appeal_unresolved_release:" + deal_id)
+        if buyer_cut > 0:
+            self._pay(deal.buyer, buyer_cut, "appeal_unresolved_refund:" + deal_id)
+        bond = int(deal.appeal_bond_atto)
+        if bond > 0:
+            self._pay(deal.appellant, bond, "appeal_returned:" + deal_id)
+        self._log({
+            "event": "unresolved_appeal_upheld",
+            "id": deal_id,
+            "outcome": str(deal.outcome),
+            "seller_atto": str(seller_cut),
+            "buyer_atto": str(buyer_cut),
+            "bond_returned_atto": str(bond),
+        })
 
     # ------------------------------------------------------------- reasoning
 
@@ -893,6 +1033,10 @@ class Sacramentum(gl.Contract):
             "DELIVERABLE SUBMITTED BY SELLER:\n"
             "url: " + inputs["delivery_url"] + "\n"
             "note: " + inputs["delivery_note"] + "\n\n"
+            "DELIVERY TIMING:\n"
+            "deadline_unix: " + str(inputs["deadline_unix"]) + "\n"
+            "delivered_at_unix: " + str(inputs["delivered_at_unix"]) + "\n"
+            "on_time: " + ("yes" if inputs["on_time"] else "no") + "\n\n"
             "DISPUTE REASON:\n" + inputs["dispute_reason"] + "\n\n"
             "EVIDENCE FILED BY THE PARTIES (untrusted claims, weigh against the sources):\n"
             + ("\n".join(inputs["evidence"]) if inputs["evidence"] else "(none filed)") + "\n\n"
@@ -903,6 +1047,7 @@ class Sacramentum(gl.Contract):
             "- NON_COMPLIANT: the deliverable fails the terms; the buyer is refunded in full.\n"
             "- PARTIAL: the deliverable satisfies the terms in part; set release_bps to the share "
             "of the escrow the seller has earned (0-10000).\n"
+            "- If the terms make timeliness a criterion, treat on_time=no as failing it.\n"
             "- If the evidence is insufficient to judge, use UNDETERMINED.\n\n"
             "Respond as JSON only:\n"
             '{"outcome":"COMPLIANT|NON_COMPLIANT|PARTIAL|UNDETERMINED","release_bps":0-10000,'
@@ -1088,6 +1233,9 @@ class Sacramentum(gl.Contract):
             "delivery_url": str(deal.delivery_url),
             "delivered_at_unix": int(deal.delivered_at_unix),
             "outcome": str(deal.outcome),
+            "unresolved_at_unix": int(deal.unresolved_at_unix),
+            "appeal_filed_at_unix": int(deal.appeal_filed_at_unix),
+            "recovery_at_unix": self._unresolved_recovery_at(deal),
             "release_bps": int(deal.release_bps),
             "confidence": int(deal.confidence),
             "appeal_deadline_unix": int(deal.appeal_deadline_unix),
@@ -1110,6 +1258,10 @@ class Sacramentum(gl.Contract):
             "outcome": str(deal.outcome),
             "release_bps": int(deal.release_bps),
             "first_release_bps": int(deal.first_release_bps),
+            "deadline_unix": int(deal.deadline_unix),
+            "delivered_at_unix": int(deal.delivered_at_unix),
+            "unresolved_at_unix": int(deal.unresolved_at_unix),
+            "appeal_filed_at_unix": int(deal.appeal_filed_at_unix),
             "rationale": str(deal.rationale),
             "confidence": int(deal.confidence),
             "sources": self._sources_as_list(deal_id),

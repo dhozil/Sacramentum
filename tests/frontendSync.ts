@@ -152,6 +152,7 @@ const CONSTANT_MAP = {
   MIN_APPEAL_BOND_ATTO: "minAppealBondAtto",
   RELEASE_BUCKET_BPS: "releaseBucketBps",
   RELEASE_TOLERANCE_BPS: "releaseToleranceBps",
+  UNRESOLVED_GRACE_SEC: "unresolvedGraceSec",
   MAX_EVIDENCE_PER_PARTY: "maxEvidencePerParty",
   MAX_SOURCES: "maxSources",
   MAX_CRITERIA: "maxCriteria",

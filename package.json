@@ -9,6 +9,7 @@
     "deploy:dry": "node deploy/deployScript.ts --dry-run",
     "demo": "node deploy/demoScript.ts",
     "verify": "node deploy/verifyScript.ts",
+    "test:steward": "node deploy/stewardLiveTest.ts",
     "test:sync": "node tests/frontendSync.ts",
     "test:frontend": "node tests/frontendIntegration.ts",
     "test:frontend:write": "node tests/frontendIntegration.ts --write",

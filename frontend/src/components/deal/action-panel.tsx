@@ -77,7 +77,11 @@ function ActionButton({
         {busy ? (
           <>
             <Loader2 className="animate-spin" />
-            {phase === "signing" ? "Signing…" : "Waiting for consensus…"}
+            {phase === "signing"
+              ? "Signing…"
+              : phase === "confirming"
+                ? "Confirming state…"
+                : "Waiting for consensus…"}
           </>
         ) : (
           children
@@ -88,9 +92,11 @@ function ActionButton({
           <p className="mt-2 text-xs text-muted">
             {phase === "signing"
               ? "Confirm in your wallet."
-              : `Validators are reaching consensus — this can take a few minutes${
-                  elapsed ? ` (${formatElapsed(elapsed)})` : ""
-                }. Leave this page open; it will not fail early.`}
+              : phase === "confirming"
+                ? "Consensus is in. Reading the ledger back to confirm the state actually changed."
+                : `Validators are reaching consensus — this can take a few minutes${
+                    elapsed ? ` (${formatElapsed(elapsed)})` : ""
+                  }. Leave this page open; it will not fail early.`}
           </p>
         ) : null}
       </div>
@@ -99,7 +105,16 @@ function ActionButton({
       ) : null}
       {note ? <div className="mt-2 text-xs text-muted">{note}</div> : null}
       {error ? <p className="mt-2 text-xs text-seal">{error}</p> : null}
-      {done && !error ? <p className="mt-2 text-xs text-verdigris">Settled on-chain.</p> : null}
+      {done && !error ? (
+        phase === "accepted" ? (
+          <p className="mt-2 text-xs text-brass">
+            Accepted by consensus, but the ledger has not shown the state change yet. Refresh in a
+            moment to confirm it before treating it as settled.
+          </p>
+        ) : (
+          <p className="mt-2 text-xs text-verdigris">State change confirmed on-chain.</p>
+        )
+      ) : null}
     </div>
   );
 }
@@ -157,10 +172,15 @@ function FundForm({ deal, onChanged }: { deal: Deal; onChanged: () => void }) {
 function DeliveryForm({ deal, onChanged }: { deal: Deal; onChanged: () => void }) {
   const [url, setUrl] = React.useState("");
   const [note, setNote] = React.useState("");
-  const valid = url.trim().startsWith("https://");
+  const now = useNow();
+  const pastDeadline = now > deal.deadline_unix;
+  const valid = url.trim().startsWith("https://") && !pastDeadline;
   return (
     <Section title="Submit the deliverable">
-      <Field label="Delivery URL" hint="Must be https://. The AI panel reads only committed sources.">
+      <Field
+        label="Delivery URL"
+        hint="Must be https://. Delivered before the deadline, the panel reads it alongside the committed manifest and any evidence URLs either party files in a dispute."
+      >
         <Input
           value={url}
           onChange={(event) => setUrl(event.target.value)}
@@ -174,6 +194,14 @@ function DeliveryForm({ deal, onChanged }: { deal: Deal; onChanged: () => void }
           placeholder="What was delivered and where to look."
         />
       </Field>
+      {pastDeadline ? (
+        <p className="text-xs text-seal">
+          The deadline passed. Delivery is closed and the buyer can claim a refund; a late
+          submission can no longer move the escrow.
+        </p>
+      ) : (
+        <p className="text-xs text-muted">Deliver before {relativeTime(deal.deadline_unix)}.</p>
+      )}
       <ActionButton
         submit={(client, onPhase) => submitDelivery(client, deal.id, url.trim(), note, onPhase)}
         disabled={!valid}
@@ -280,6 +308,7 @@ export function ActionPanel({
   const disputeOpen = now <= deal.delivered_at_unix + PROTOCOL.disputeWindowSec;
   const deadlinePassed = now > deal.deadline_unix;
   const disputeWindowPassed = now > deal.delivered_at_unix + PROTOCOL.disputeWindowSec;
+  const recoveryOpen = deal.recovery_at_unix > 0 && now >= deal.recovery_at_unix;
 
   const blocks: React.ReactNode[] = [];
 
@@ -344,6 +373,33 @@ export function ActionPanel({
         <ActionButton submit={(client, onPhase) => resolve(client, deal.id, onPhase)} onChanged={onChanged}>
           Run adjudication
         </ActionButton>
+        {deal.recovery_at_unix > 0 ? (
+          <p className="text-xs text-muted">
+            If the panel stays undetermined, a neutral recovery opens{" "}
+            {relativeTime(deal.recovery_at_unix)}.
+          </p>
+        ) : null}
+      </Section>,
+    );
+  }
+  if (
+    status === "DISPUTED" &&
+    recoveryOpen &&
+    (deal.outcome === "UNDETERMINED" || deal.outcome === "")
+  ) {
+    blocks.push(
+      <Section key="recover-dispute" title="Recover an unresolved dispute" tone="verdigris">
+        <p className="text-sm text-muted">
+          The panel has not reached a verdict within the recovery window. Permissionless: close the
+          deal on a neutral 50/50 split so the escrow cannot stay locked.
+        </p>
+        <ActionButton
+          variant="verdigris"
+          submit={(client, onPhase) => claimTimeout(client, deal.id, onPhase)}
+          onChanged={onChanged}
+        >
+          Split &amp; close
+        </ActionButton>
       </Section>,
     );
   }
@@ -376,6 +432,29 @@ export function ActionPanel({
           onChanged={onChanged}
         >
           Decide appeal
+        </ActionButton>
+        {deal.recovery_at_unix > 0 ? (
+          <p className="text-xs text-muted">
+            If the appeal stays undecided, a recovery opens {relativeTime(deal.recovery_at_unix)}.
+          </p>
+        ) : null}
+      </Section>,
+    );
+  }
+  if (status === "APPEALED" && recoveryOpen) {
+    blocks.push(
+      <Section key="recover-appeal" title="Recover an unresolved appeal" tone="verdigris">
+        <p className="text-sm text-muted">
+          The second panel has not decided within the recovery window. Permissionless: uphold the
+          first verdict and return the bond to the appellant, so neither the escrow nor the bond can
+          stay locked.
+        </p>
+        <ActionButton
+          variant="verdigris"
+          submit={(client, onPhase) => claimTimeout(client, deal.id, onPhase)}
+          onChanged={onChanged}
+        >
+          Uphold &amp; close
         </ActionButton>
       </Section>,
     );

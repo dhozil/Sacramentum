@@ -358,7 +358,7 @@ def test_validator_rejects_a_different_outcome(warp, direct_vm, direct_deploy, d
     assert direct_vm.run_validator() is False
 
 
-def test_validator_tolerates_a_release_bps_bucket(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+def test_validator_accepts_the_same_partial_bucket(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
     contract = direct_deploy(CONTRACT)
     direct_vm.sender = direct_alice
     deal_id = open_deal(direct_vm, contract, hx(direct_bob))
@@ -368,9 +368,25 @@ def test_validator_tolerates_a_release_bps_bucket(warp, direct_vm, direct_deploy
     contract.resolve(deal_id)
     direct_vm.clear_mocks()
     mock_source(direct_vm)
-    # Same outcome, one bucket away and a different confidence bucket: still acceptable.
-    mock_adjudication(direct_vm, "PARTIAL", 5500, confidence=70, rationale="different wording entirely")
+    # Same bucket and a different confidence wording: still acceptable.
+    mock_adjudication(direct_vm, "PARTIAL", 5000, confidence=70, rationale="different wording entirely")
     assert direct_vm.run_validator() is True
+
+
+def test_validator_rejects_a_materially_different_partial_payout(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    """A partial payout moves real money, so validators must agree on the exact
+    bucket once the tolerance is below the bucket width (500 bps)."""
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    bring_to_dispute(direct_vm, contract, deal_id, direct_alice, direct_bob)
+    mock_source(direct_vm)
+    mock_adjudication(direct_vm, "PARTIAL", 5000, confidence=90)
+    contract.resolve(deal_id)
+    direct_vm.clear_mocks()
+    mock_source(direct_vm)
+    mock_adjudication(direct_vm, "PARTIAL", 5500, confidence=90)
+    assert direct_vm.run_validator() is False
 
 
 def test_validator_rejects_garbage_model_output(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -594,3 +610,198 @@ def test_claim_timeout_cannot_be_used_from_a_resolved_deal(warp, direct_vm, dire
     deal_id = _resolved(direct_vm, contract, direct_alice, direct_bob)
     with direct_vm.expect_revert("cannot be claimed from RESOLVED"):
         contract.claim_timeout(deal_id)
+
+
+# ---------------------------------------------------------------- deadlines
+
+
+def test_late_delivery_is_rejected_after_the_deadline(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    """A seller must not be able to beat the buyer's refund by delivering late."""
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    direct_vm.sender = direct_bob
+    contract.accept_deal(deal_id)
+
+    direct_vm.warp((BASE_DT + timedelta(seconds=7 * 24 * 3600 + 1)).isoformat())
+    with direct_vm.expect_revert("delivery deadline for"):
+        contract.submit_delivery(deal_id, "https://example.org/delivery", "late")
+    assert deal(contract, deal_id)["status"] == "ACCEPTED"
+
+    # The refund path is still open and pays the buyer in full.
+    contract.claim_timeout(deal_id)
+    assert deal(contract, deal_id)["status"] == "REFUNDED"
+    assert stats(contract)["conserved"] is True
+
+
+def test_on_time_delivery_wins_the_race_against_cancel(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    direct_vm.sender = direct_bob
+    contract.accept_deal(deal_id)
+    contract.submit_delivery(deal_id, "https://example.org/delivery", "on time")
+
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("cannot be cancelled from DELIVERED"):
+        contract.cancel_deal(deal_id)
+    assert deal(contract, deal_id)["status"] == "DELIVERED"
+
+
+def test_cancel_wins_the_race_against_a_later_delivery(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    direct_vm.sender = direct_bob
+    contract.accept_deal(deal_id)
+
+    direct_vm.sender = direct_alice
+    contract.cancel_deal(deal_id)
+
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("is not accepted"):
+        contract.submit_delivery(deal_id, "https://example.org/delivery", "after cancel")
+    assert deal(contract, deal_id)["status"] == "REFUNDED"
+    assert stats(contract)["conserved"] is True
+
+
+# ------------------------------------------------------- bounded recovery
+
+
+def test_claim_timeout_waits_for_the_recovery_grace(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    bring_to_dispute(direct_vm, contract, deal_id, direct_alice, direct_bob)
+    mock_source(direct_vm, body="ambiguous")
+    mock_adjudication(direct_vm, "UNDETERMINED", 0)
+    contract.resolve(deal_id)
+    assert deal(contract, deal_id)["status"] == "DISPUTED"
+
+    with direct_vm.expect_revert("not yet recoverable"):
+        contract.claim_timeout(deal_id)
+
+    grace = sys.modules["_contract_sacramentum"].UNRESOLVED_GRACE_SEC
+    direct_vm.warp((BASE_DT + timedelta(seconds=grace + 1)).isoformat())
+    contract.claim_timeout(deal_id)
+
+    view = deal(contract, deal_id)
+    assert view["status"] == "FINALIZED"
+    assert view["outcome"] == "PARTIAL"
+    assert view["release_bps"] == 5000
+    report = stats(contract)
+    assert report["total_released_atto"] == str(5 * GEN)
+    assert report["total_refunded_atto"] == str(5 * GEN)
+    assert report["held_atto"] == "0"
+    assert report["conserved"] is True
+
+
+def test_claim_timeout_recovers_a_dispute_that_was_never_adjudicated(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    bring_to_dispute(direct_vm, contract, deal_id, direct_alice, direct_bob)
+
+    with direct_vm.expect_revert("not yet recoverable"):
+        contract.claim_timeout(deal_id)
+
+    module = sys.modules["_contract_sacramentum"]
+    wait = module.EVIDENCE_WINDOW_SEC + module.UNRESOLVED_GRACE_SEC + 1
+    direct_vm.warp((BASE_DT + timedelta(seconds=wait)).isoformat())
+    contract.claim_timeout(deal_id)
+    assert deal(contract, deal_id)["status"] == "FINALIZED"
+    assert stats(contract)["conserved"] is True
+
+
+def test_recovery_window_is_only_exposed_while_a_dispute_is_live(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    assert deal(contract, deal_id)["recovery_at_unix"] == 0
+
+    bring_to_dispute(direct_vm, contract, deal_id, direct_alice, direct_bob)
+    assert deal(contract, deal_id)["recovery_at_unix"] > 0
+
+    resolved_id = _resolved(direct_vm, contract, direct_alice, direct_bob, "COMPLIANT", 10000)
+    assert deal(contract, resolved_id)["recovery_at_unix"] == 0
+
+
+def test_claim_timeout_returns_the_bond_and_upholds_an_undetermined_appeal(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    deal_id = _resolved(direct_vm, contract, direct_alice, direct_bob, "COMPLIANT", 10000)
+    required = 10 * GEN * 2500 // 10000
+
+    # The buyer lost round one, appeals, and the second panel cannot decide.
+    direct_vm.sender = direct_alice
+    direct_vm.value = required
+    contract.appeal(deal_id)
+    direct_vm.value = 0
+
+    direct_vm.clear_mocks()
+    mock_source(direct_vm, body="still ambiguous")
+    mock_adjudication(direct_vm, "UNDETERMINED", 0)
+    contract.resolve_appeal(deal_id)
+    assert deal(contract, deal_id)["status"] == "APPEALED"
+
+    with direct_vm.expect_revert("not yet recoverable"):
+        contract.claim_timeout(deal_id)
+
+    grace = sys.modules["_contract_sacramentum"].UNRESOLVED_GRACE_SEC
+    direct_vm.warp((BASE_DT + timedelta(seconds=grace + 1)).isoformat())
+    contract.claim_timeout(deal_id)
+
+    view = deal(contract, deal_id)
+    assert view["status"] == "FINALIZED"
+    assert view["outcome"] == "COMPLIANT"
+    assert view["release_bps"] == 10000
+    report = stats(contract)
+    assert report["held_atto"] == "0"
+    # The escrow stands on the first verdict; the inconclusive bond comes back.
+    assert report["lifetime_outflow_atto"] == str(10 * GEN + required)
+    assert report["conserved"] is True
+
+
+def test_claim_timeout_recovers_an_appeal_that_was_never_decided(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    deal_id = _resolved(direct_vm, contract, direct_alice, direct_bob, "NON_COMPLIANT", 0)
+    required = 10 * GEN * 2500 // 10000
+
+    direct_vm.sender = direct_bob
+    direct_vm.value = required
+    contract.appeal(deal_id)
+    direct_vm.value = 0
+
+    with direct_vm.expect_revert("not yet recoverable"):
+        contract.claim_timeout(deal_id)
+
+    grace = sys.modules["_contract_sacramentum"].UNRESOLVED_GRACE_SEC
+    direct_vm.warp((BASE_DT + timedelta(seconds=grace + 1)).isoformat())
+    contract.claim_timeout(deal_id)
+
+    view = deal(contract, deal_id)
+    assert view["status"] == "FINALIZED"
+    assert view["outcome"] == "NON_COMPLIANT"
+    assert stats(contract)["conserved"] is True
+
+
+def test_bounced_payout_rejoins_held_value(warp, direct_vm, direct_deploy, direct_alice, direct_bob):
+    """A bounced transfer returns its value through the error hook; the money
+    must land back in held value, not vanish."""
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+    deal_id = open_deal(direct_vm, contract, hx(direct_bob))
+    direct_vm.sender = direct_bob
+    contract.accept_deal(deal_id)
+    contract.submit_delivery(deal_id, "https://example.org/delivery", "shipped")
+    direct_vm.sender = direct_alice
+    contract.confirm_delivery(deal_id)
+    assert stats(contract)["held_atto"] == "0"
+
+    direct_vm.value = 10 * GEN
+    contract.__on_errored_message__()
+    direct_vm.value = 0
+
+    report = stats(contract)
+    assert report["held_atto"] == str(10 * GEN)
+    assert report["lifetime_outflow_atto"] == "0"
+    assert report["conserved"] is True

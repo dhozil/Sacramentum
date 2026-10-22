@@ -39,8 +39,22 @@ appeal round. Repo folder stays
 - 21 methods = 8 view + 13 write. `open_deal` ids are `d` + count, so `d1..dN`.
 - Consensus via `gl.vm.run_nondet_unsafe(leader_fn, validator_fn)`. Equivalence
   compares ONLY `outcome` (exact) + `release_bps` (exact except PARTIAL,
-  tolerance 500). `confidence` is audit-only — comparing it caused frequent
-  `contract_error`. rationale/satisfied/model_output are audit-only too.
+  tolerance 250 — below the 500 bps bucket, so partials must match exactly).
+  `confidence` is audit-only — comparing it caused frequent `contract_error`.
+  rationale/satisfied/model_output are audit-only too.
+- `submit_delivery` rejects after `deadline_unix` (a late delivery can never
+  beat the buyer's `claim_timeout` refund). The adjudication prompt also carries
+  `deadline_unix` / `delivered_at_unix` / `on_time`.
+- `claim_timeout` is the full liveness backstop: DISPUTED and APPEALED deals
+  that stay inconclusive are closed after `UNRESOLVED_GRACE_SEC` from the last
+  `UNDETERMINED` round (`unresolved_at_unix`, reset by each fresh `resolve`;
+  `appeal_filed_at_unix` when no round ran). DISPUTED → neutral 50/50 split
+  (`release_bps=5000`, PARTIAL, FINALIZED); APPEALED → uphold round one and
+  return the bond to the appellant. `get_deal.recovery_at_unix` is 0 unless the
+  status is DISPUTED or APPEALED.
+- New `Deal` fields are appended at the END of the dataclass (storage layout is
+  positional). GenVM pins `datetime.now()` to the transaction timestamp, so
+  deadline/grace arithmetic is validator-deterministic.
 - `get_deal` has NO `appellant`/`first_release_bps`; those live in
   `get_deal_audit`. `get_verdict(deal_id)` returns `rounds[]` (slot 0 first,
   slot 1 appeal) + a static `equivalence` block; stored in
@@ -51,7 +65,10 @@ appeal round. Repo folder stays
 - Protocol constants: `MIN_ESCROW_ATTO=1`, `DISPUTE_WINDOW_SEC=3600`,
   `EVIDENCE_WINDOW_SEC=1800`, `APPEAL_BOND_BPS=2500`,
   `MIN_APPEAL_BOND_ATTO=10**15`, `MAX_SOURCES=3`, `MAX_CRITERIA=12`,
-  `MAX_EVIDENCE_PER_PARTY=3`, `STATEMENT_CLIP=1200`, `MAX_LOG=500`.
+  `MAX_EVIDENCE_PER_PARTY=3`, `STATEMENT_CLIP=1200`, `MAX_LOG=500`,
+  `RELEASE_BUCKET_BPS=500`, `RELEASE_TOLERANCE_BPS=250`,
+  `UNRESOLVED_GRACE_SEC=3600`. The panel reads the committed manifest plus any
+  https evidence URLs filed during a dispute (cap 8).
 - Terms JSON must have a non-empty `deliverable` string and a `criteria` list of
   `{id,text}` objects; canonicalised then digested.
 
@@ -78,19 +95,23 @@ appeal round. Repo folder stays
   exports — `cacheComponents` rejects them.
 
 ## Live deployment
-- Canonical contract: `0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6`
-  (deploy tx `0x65f15e8753607534d4d2bacbea46985609fc569a54e3a9ba9f3568354ec841d0`).
-- Verified against it (not a fresh deploy): **39 passed, 0 failed**. Buyer =
+- Canonical contract (steward-fix build, 2026-10-22):
+  `0x9b3790A80972EE0a052022b2B595489573ec5361`. Frontend default +
+  `frontend/.env.local` point at it. The old `0x0DA8…` build is superseded.
+- `npm run verify` on that fresh deploy = **38 passed / 0 failed**. Buyer =
   `wallet/.env` `GENLAYER_DEV_KEY` = `0x3958A649b41cd7C8561F4233cC0F5b0469Bc98E0`;
   seller = `wallet/seller.env` = `0x99bF44395CaC814E671ADFF8b69d968Fac4e5Db3`.
-  Deals `d1..d6` are live on it (`d5` = OPEN and `d6` = RELEASED, both made by
-  `frontendIntegration --full`).
-- Last full re-verification (2026-10-19): `npm run verify` on a fresh deploy
-  (`0x6272014cB81b112b75f67Ee07BE828998F78D777`) = **38 passed / 0 failed** — one
-  fewer than 39 only because the "seller funded" check is skipped when the seller
-  already holds ≥1 GEN. `test:frontend:write` 16/0, `--full` 29/0 (moves 0.01 GEN
-  buyer → seller through the frontend wrappers, phases `signing → waiting →
-  confirmed`), context read-only 12/0.
+  Deals `d1..d7` are live: `d1..d4` from verify, `d5` REFUNDED and `d6` DISPUTED
+  from `deploy/stewardLiveTest.ts` (recovery opens `2026-10-22T05:56:41Z`), `d7`
+  RELEASED from `test:frontend:full`.
+- `deploy/stewardLiveTest.ts --address <0x…>` = **31 passed / 0 failed**: late
+  `submit_delivery` rejected, `recovery_at_unix` only exposed for DISPUTED/
+  APPEALED, `claim_timeout` refuses before the window, evidence-after-funding,
+  tolerance 250 published. Time-based positive recoveries need direct-mode
+  `warp` (Studionet has no clock jump).
+- `test:frontend` 12/0, `test:frontend:full` 29/0 (moves 0.01 GEN buyer →
+  seller through the frontend wrappers, phases `signing → waiting → confirming →
+  confirmed`).
 - Wallet folder `D:\Genlayer-project\wallet`: `.env` (buyer key), `seller.env` +
   `seller.json` (new seller), `address.txt`, `recipient.json` (older seller,
   fallback). Never commit keys.
@@ -156,8 +177,12 @@ appeal round. Repo folder stays
 
 ## Frontend tx hardening & tests
 - All writes go through `submit()` in `lib/sacramentum.ts` and every wrapper
-  takes an optional `onPhase` reporter (`"signing" | "waiting" | "confirmed"`)
-  that drives the button copy and the live-status line.
+  takes an optional `onPhase` reporter (`"signing" | "waiting" | "confirming" |
+  "confirmed" | "accepted"`) that drives the button copy and the live-status
+  line. ACCEPTED consensus is not "settled": each wrapper passes a state
+  verifier that reads the contract back (`stateConfirmed`), so the UI shows
+  "confirmed on-chain" only when the change is observable, otherwise "accepted
+  by consensus — refresh".
 - Consensus wait is `CONSENSUS_WAIT = { intervalMs: 5000, retries: 120 }`
   (~10 min) — deliberately long so a slow panel settles instead of failing
   early; `waitForReceipt` retries transient RPC noise (rate limit/5xx/HTML) up
