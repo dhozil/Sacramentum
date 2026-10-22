@@ -30,12 +30,12 @@
 
 | | |
 | --- | --- |
-| **Contract** | `0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6` on Studionet |
+| **Contract** | `0x9b3790A80972EE0a052022b2B595489573ec5361` on Studionet |
 | **Chain** | GenLayer Studionet · id `61999` (`0xF22F`) |
 | **Interface** | 13 writes · 8 views · no constructor args |
 | **Consensus** | leader/validator round comparing `outcome` + `release_bps` only |
-| **Frontend** | Next.js 16 · React 19 · Tailwind v4, talks to the RPC directly |
-| **Verification** | 39 passed / 0 failed on-chain (write + read, balance deltas) |
+| **Frontend** | Next.js 16 · React 19 · Tailwind v4, talks to the RPC through a same-origin proxy |
+| **Verification** | 38 passed / 0 failed on-chain (write + read, balance deltas) |
 
 ## Lifecycle
 
@@ -255,9 +255,12 @@ call it expects to revert.
 ## Live deployment
 
 ```
-contract  0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6
-tx        0x65f15e8753607534d4d2bacbea46985609fc569a54e3a9ba9f3568354ec841d0
+contract  0x9b3790A80972EE0a052022b2B595489573ec5361
+verified  2026-10-22
 ```
 
-Last verified against that address live (write + read, buyer `0x3958…98E0`,
-seller `0x99bF…5Db3`): **39 passed, 0 failed**.
+Verified on that address live (write + read, buyer `0x3958…98E0`,
+seller `0x99bF…5Db3`): **38 passed, 0 failed**. The steward-specific checks
+(`npm run test:steward -- --address 0x9b37…`) add **31 passed, 0 failed**:
+late-delivery rejection, the bounded recovery window, evidence after funding,
+and the published 250 bps partial tolerance.

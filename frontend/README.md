@@ -11,7 +11,7 @@ wallet the user picks via **EIP-6963**, so MetaMask and Rabby never fight over
 `.env.local` (see `.env.example`):
 
 ```
-NEXT_PUBLIC_SACRAMENTUM_ADDRESS=0x0DA83e6200318ca83C6C9ed77C3dCE6bdec60Bd6
+NEXT_PUBLIC_SACRAMENTUM_ADDRESS=0x9b3790A80972EE0a052022b2B595489573ec5361
 ```
 
 Studionet is baked in: chain id `61999` (`0xf22f`), RPC
@@ -31,7 +31,7 @@ npm run build
 | Route         | Purpose                                                              |
 | ------------- | -------------------------------------------------------------------- |
 | `/`           | Landing: 3D tribunal hero, live `get_stats`, lifecycle, recent events |
-| `/market`     | Every deal, filtered by state and by "mine"                           |
+| `/market`     | Every deal, filtered by status and by role (everyone / seller / buyer) |
 | `/deal/[id]`  | Deal dossier, terms, verdict rounds, and a role-aware action panel    |
 | `/open`       | Compose machine-readable terms and commit them as the buyer           |
 
